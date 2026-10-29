@@ -15,6 +15,7 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-
+      - name: Install JobSpy
+        run: python -m pip install python-jobspy==1.4.1
       - name: Run our Python file
         run: python main.py
