@@ -7,7 +7,8 @@ jobs = scrape_jobs(
     search_term="data analyst",
     location="Netherlands",
     results_wanted=5,
-    fetch_description=False,
+    fetch_description=True,
+    description_format="plain",
     verbose=2,
 )
 
@@ -15,4 +16,11 @@ print(f"Returned {len(jobs)} jobs")
 print("Search errors:", jobs.attrs.get("errors", {}))
 
 if not jobs.empty:
-    print(jobs[["title", "company", "job_url"]].to_string(index=False))
+    jobs["description_characters"] = (
+        jobs["description"].fillna("").str.len()
+    )
+
+    print(
+        jobs[["title", "description_characters"]]
+        .to_string(index=False)
+    )
