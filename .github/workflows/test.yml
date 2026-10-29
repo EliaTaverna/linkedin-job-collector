@@ -8,10 +8,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Download repository files
+        uses: actions/checkout@v7
+
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
-      - name: Run our first Python command
-        run: python -c "print('Hello Elia, this is running on GitHub!')"
+      - name: Run our Python file
+        run: python main.py
