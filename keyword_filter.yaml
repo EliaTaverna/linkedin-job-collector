@@ -1,10 +1,83 @@
-# Before calling the LLM, require at least one of these words in the description.
+# Before calling the LLM, require at least one of these terms in the description.
 # Matching is case-insensitive and uses whole-word boundaries.
-# No other description keyword is mandatory: the word 'data' is not required.
+# Spaces in phrases also match hyphens, including Unicode hyphens.
+# All entries below are alternatives (OR); no match from each group is required.
 enabled: true
 all_of: []
 any_of:
+  # Programming and scripting.
   - "Python"
   - "Programming"
   - "Coding"
+  - "Scripting"
+  - "Programmer"
+  - "Software development"
+  - "MATLAB"
+  - "R programming"  # Avoid matching R&D through a standalone R.
+  - "RStudio"
+  - "VBA"
+
+  # Data and machine learning.
   - "SQL"
+  - "Machine learning"
+  - "Deep learning"
+  - "pandas"
+  - "NumPy"
+  - "scikit learn"  # Also matches scikit-learn.
+  - "sklearn"
+  - "PyTorch"
+  - "Keras"
+  - "TensorFlow"
+  - "ETL"
+  - "Data pipelines"
+  - "Databricks"
+  - "PySpark"
+  - "Apache Spark"
+
+  # Analytics and process mining.
+  - "Power BI"
+  - "PowerBI"
+  - "Power Query"
+  - "DAX"
+  - "Tableau"
+  - "Alteryx"
+  - "Celonis"
+  - "PQL"
+  - "Process mining"
+
+  # Simulation tools.
+  - "AnyLogic"
+  - "SimPy"
+  - "Simio"
+  - "Arena"
+  - "FlexSim"
+  - "Simul8"
+  - "Vensim"
+  - "Plant Simulation"
+
+  # Operations research and mathematical optimisation.
+  - "Operations research"
+  - "Operational research"
+  - "Gurobi"
+  - "CPLEX"
+  - "OR Tools"  # Also matches OR-Tools.
+  - "Pyomo"
+  - "Linear programming"
+  - "Integer programming"
+  - "Constraint programming"
+  - "Mathematical optimization"
+  - "Mathematical optimisation"
+
+  # Quantitative methods; include both English spelling variants.
+  - "Discrete event simulation"
+  - "Agent based modelling"
+  - "Agent based modeling"
+  - "Agent based simulation"
+  - "System dynamics"
+  - "Monte Carlo"
+  - "Mathematical modelling"
+  - "Mathematical modeling"
+  - "Statistical modelling"
+  - "Statistical modeling"
+  - "Regression analysis"
+  - "Time series"
