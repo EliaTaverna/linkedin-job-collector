@@ -199,5 +199,3 @@ else:
         flush=True,
     )
 
-else:
-    print("No new jobs to add.", flush=True)
