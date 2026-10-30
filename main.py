@@ -1,14 +1,16 @@
 import json
+import logging
 import os
 
 import gspread
 import pandas as pd
-from jobspy import scrape_jobs
+from jobspy.linkedin import LinkedIn
+from jobspy.model import ScraperInput
 from langdetect import DetectorFactory, detect
 from langdetect.lang_detect_exception import LangDetectException
 
 
-# Make language detection consistent between runs
+logging.basicConfig(level=logging.INFO)
 DetectorFactory.seed = 0
 
 
@@ -20,6 +22,25 @@ def detect_ad_language(description):
         return detect(description)
     except LangDetectException:
         return "unknown"
+
+
+# Extend JobSpy's LinkedIn scraper
+class CachedLinkedIn(LinkedIn):
+    def __init__(self, saved_urls):
+        super().__init__()
+        self.saved_urls = saved_urls
+        self.description_downloads = 0
+
+    def _fetch_details(self, job_id):
+        job_url = f"{self.base_url}/jobs/view/{job_id}"
+
+        # Already saved: skip the description request
+        if job_url in self.saved_urls:
+            return {}
+
+        # New job: use JobSpy's original downloader
+        self.description_downloads += 1
+        return super()._fetch_details(job_id)
 
 
 # Connect to Google Sheets
@@ -36,7 +57,7 @@ spreadsheet = client.open_by_key(os.environ["GOOGLE_SHEET_ID"])
 worksheet = spreadsheet.worksheet("Jobs")
 
 
-# Write only the column headings
+# Write column headings
 columns = [
     "title",
     "company",
@@ -53,7 +74,7 @@ worksheet.update(
 )
 
 
-# Read URLs already saved in column C, skipping the header
+# Read saved URLs from column C
 existing_urls = {
     url.strip()
     for url in worksheet.col_values(3)[1:]
@@ -63,24 +84,43 @@ existing_urls = {
 print(f"Already saved: {len(existing_urls)} distinct job URLs")
 
 
-# Search LinkedIn
-print("Searching LinkedIn...", flush=True)
+# Create our scraper with the saved URLs
+scraper = CachedLinkedIn(existing_urls)
 
-jobs = scrape_jobs(
+search_settings = ScraperInput(
     site_name=["linkedin"],
     search_term="data analyst",
     location="Netherlands",
+    distance=50,
     results_wanted=5,
     fetch_description=True,
     description_format="plain",
     verbose=2,
 )
 
+
+# Search LinkedIn
+print("Searching LinkedIn...", flush=True)
+
+job_posts = scraper.scrape(search_settings)
+
+# Convert JobSpy's job objects into a pandas table
+jobs = pd.DataFrame([
+    job.model_dump()
+    for job in job_posts
+])
+
 print(f"Returned {len(jobs)} jobs")
-print("Search errors:", jobs.attrs.get("errors", {}))
+print(
+    "Search errors:",
+    {"linkedin": scraper.error} if scraper.error else {},
+)
+print(
+    f"Description downloads attempted: {scraper.description_downloads}"
+)
 
 
-# Keep jobs whose URLs are not already in the sheet
+# Keep only new URLs
 if not jobs.empty:
     jobs["job_url"] = jobs["job_url"].fillna("").str.strip()
 
@@ -94,7 +134,20 @@ if not jobs.empty:
     )
 
 
-# Prepare and append the new rows
+# Leave failed descriptions unsaved so a later run can retry them
+if not jobs.empty:
+    has_description = (
+        jobs["description"].fillna("").str.strip() != ""
+    )
+
+    print(
+        f"New jobs without a description: {(~has_description).sum()}"
+    )
+
+    jobs = jobs[has_description].copy()
+
+
+# Prepare and append new jobs
 if not jobs.empty:
     jobs["mentions_dutch"] = (
         jobs["description"]
@@ -113,7 +166,6 @@ if not jobs.empty:
     output = jobs.reindex(columns=columns).copy()
     print(output.to_string(index=False))
 
-    # Convert publication dates into Google Sheets date numbers
     publication_dates = pd.to_datetime(
         output["date_posted"],
         errors="coerce",
@@ -127,7 +179,6 @@ if not jobs.empty:
 
     rows = output.fillna("").values.tolist()
 
-    # Append new rows beneath the existing jobs
     worksheet.append_rows(
         values=rows,
         value_input_option="RAW",
@@ -141,6 +192,12 @@ if not jobs.empty:
     )
 
     print(f"Added {len(rows)} new jobs.", flush=True)
+
+else:
+    print(
+        "No new jobs with a readable description to add.",
+        flush=True,
+    )
 
 else:
     print("No new jobs to add.", flush=True)
