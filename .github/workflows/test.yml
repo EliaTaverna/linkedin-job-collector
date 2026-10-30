@@ -3,8 +3,17 @@ name: Test Python
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: '0 0 * * *'
+      timezone: 'Europe/Rome'
+
 permissions:
   contents: read
+
+# Prevent two runs from updating the sheet simultaneously
+concurrency:
+  group: linkedin-job-collector
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -21,7 +30,7 @@ jobs:
 
       - name: Install Python packages
         run: |
-          python -m pip install python-jobspy==1.4.1 gspread langdetect==1.0.9
+          python -m pip install python-jobspy==1.4.1 gspread langdetect==1.0.9 PyYAML==6.0.3
 
       - name: Run our Python file
         env:
