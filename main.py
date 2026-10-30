@@ -4,6 +4,23 @@ import os
 import gspread
 import pandas as pd
 from jobspy import scrape_jobs
+from langdetect import DetectorFactory, detect
+from langdetect.lang_detect_exception import LangDetectException
+
+
+# Make language detection consistent between runs
+DetectorFactory.seed = 0
+
+
+# Detect the language of an advert
+def detect_ad_language(description):
+    if not isinstance(description, str) or not description.strip():
+        return "unknown"
+
+    try:
+        return detect(description)
+    except LangDetectException:
+        return "unknown"
 
 
 # Connect to Google Sheets
@@ -44,10 +61,13 @@ columns = [
     "job_url",
     "mentions_dutch",
     "date_posted",
+    "ad_language",
 ]
+
 rows = [columns]
 
 if not jobs.empty:
+    # Check whether the description mentions Dutch
     jobs["mentions_dutch"] = (
         jobs["description"]
         .fillna("")
@@ -56,6 +76,11 @@ if not jobs.empty:
             case=False,
             na=False,
         )
+    )
+
+    # Run our language-detection function on each description
+    jobs["ad_language"] = jobs["description"].apply(
+        detect_ad_language
     )
 
     output = jobs.reindex(columns=columns).copy()
@@ -76,15 +101,16 @@ if not jobs.empty:
     rows += output.fillna("").values.tolist()
 
 
-# Replace columns A–E with the latest results
-worksheet.batch_clear(["A:E"])
+# Replace columns A–F with the latest results
+worksheet.batch_clear(["A:F"])
+
 worksheet.update(
     range_name="A1",
     values=rows,
     raw=True,
 )
 
-# Display column E as day/month/year
+# Display publication dates as day/month/year
 worksheet.format(
     "E2:E",
     {"numberFormat": {"type": "DATE", "pattern": "dd/mm/yyyy"}},
