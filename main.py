@@ -18,7 +18,7 @@ from jobspy.util import RequestsRotating, check_status, create_session
 from langdetect import DetectorFactory, detect_langs
 from langdetect.lang_detect_exception import LangDetectException
 
-from config_engine import KeywordFilter, LLMOutput, column_name
+from config_engine import KeywordFilter, LLMOutput, TitleFilter, column_name
 
 logging.basicConfig(level=logging.INFO)
 DetectorFactory.seed = 0
@@ -54,6 +54,7 @@ def load_settings():
     llm = config.pop("llm")
     filters = OUTPUT.filters
     keyword_filter = KeywordFilter.from_yaml(CONFIG_DIR / "keyword_filter.yaml")
+    title_filter = TitleFilter.from_yaml(CONFIG_DIR / "title_filter.yaml")
     language_gate = {
         "enabled": True,
         "reject_languages": ["nl"],
@@ -101,7 +102,7 @@ def load_settings():
     )
     if settings.results_wanted > max_results or settings.offset >= max_results:
         raise ValueError(f"Search limit/offset must stay within JobSpy's {max_results} result ceiling.")
-    return settings, batch_size, float(delay), sheet_name, llm, filters, language_gate, keyword_filter, copy_cached_from
+    return settings, batch_size, float(delay), sheet_name, llm, filters, language_gate, keyword_filter, copy_cached_from, title_filter
 
 
 def rejected_description_language(description, config):
@@ -210,7 +211,7 @@ def read_jobs(worksheet):
             continue
         if url in records:
             raise ValueError(f"Duplicate job URL in row {number}.")
-        if record["analysis_status"] not in ("pending_description", "pending_analysis", "done", "needs_review", "skipped_language", "skipped_keywords"):
+        if record["analysis_status"] not in ("pending_description", "pending_analysis", "done", "needs_review", "skipped_language", "skipped_keywords", "skipped_title"):
             raise ValueError(f"Invalid analysis_status in row {number}.")
         if record["analysis_status"] == "done":
             validate_analysis({key: record[key] for key in OUTPUT.fields})
@@ -292,12 +293,38 @@ def import_cached_jobs(spreadsheet, worksheet, records, source_name):
     return records
 
 
-def process_batch(worksheet, records, urls, scraper, analyzer, filters, attempted, language_gate, keyword_filter):
+def apply_title_filter(worksheet, record, title_filter):
+    """Exclude titles before description requests; retain any existing paid analysis."""
+    accepted, reason = title_filter.evaluate(record["name"])
+    updates = {}
+    if not accepted:
+        updates["matches_filters"] = False
+        # Preserve completed classifications so editing the filter needs no paid retry.
+        if record["analysis_status"] != "done":
+            updates.update(analysis_status="skipped_title", analysis_error=reason)
+    elif record["analysis_status"] == "skipped_title":
+        # Removing a title rule reactivates its saved metadata/description.
+        updates.update(
+            analysis_status="pending_analysis" if record["description"] else "pending_description",
+            matches_filters="", analysis_error="",
+        )
+    if any(record.get(key) != value for key, value in updates.items()):
+        record.update(updates)
+        write_record(worksheet, record)
+        if not accepted:
+            print(f"Skipped by title: {record['name']}. {reason}", flush=True)
+    return accepted
+
+
+def process_batch(worksheet, records, urls, scraper, analyzer, filters, attempted, language_gate, keyword_filter, title_filter):
     completed = 0
     for url in urls:
         if url in attempted:
             continue
         record = records[url]
+        if not apply_title_filter(worksheet, record, title_filter):
+            attempted.add(url)
+            continue
         if record["analysis_status"] in ("done", "needs_review"):
             continue
         attempted.add(url)
@@ -518,7 +545,7 @@ class Collector(LinkedIn):
 
 
 def main():
-    settings, batch_size, delay, sheet_name, llm, filters, language_gate, keyword_filter, copy_cached_from = load_settings()
+    settings, batch_size, delay, sheet_name, llm, filters, language_gate, keyword_filter, copy_cached_from, title_filter = load_settings()
     mode = os.environ.get("COLLECTOR_MODE", "all")
     if mode not in ("all", "descriptions"):
         raise ValueError("COLLECTOR_MODE must be all or descriptions.")
@@ -543,13 +570,15 @@ def main():
             records = import_cached_jobs(spreadsheet, worksheet, records, copy_cached_from)
         # Apply changed filters to cached results without spending more model tokens.
         for record in records.values():
+            if not apply_title_filter(worksheet, record, title_filter):
+                continue
             if record["analysis_status"] == "done":
                 eligible = matches_filters(record, filters) and keyword_filter.matches(record["description"])
                 if record["matches_filters"] != eligible:
                     record["matches_filters"] = eligible
                     write_record(worksheet, record)
         old_pending = [url for url, record in records.items()
-                       if record["analysis_status"] in ("pending_description", "pending_analysis", "skipped_language", "skipped_keywords")]
+                       if record["analysis_status"] in ("pending_description", "pending_analysis", "skipped_language", "skipped_keywords", "skipped_title")]
         old_position = 0
         attempted = set()
         completed = 0
@@ -566,7 +595,7 @@ def main():
                 saved += added
                 count, running = process_batch(
                     worksheet, records, [job["job_url"] for job in jobs],
-                    scraper, analyzer, filters, attempted, language_gate, keyword_filter,
+                    scraper, analyzer, filters, attempted, language_gate, keyword_filter, title_filter,
                 )
                 completed += count
                 print(f"Batch saved: {added} new jobs; {count} classified.", flush=True)
@@ -574,7 +603,7 @@ def main():
                     break
                 count, running = process_batch(
                     worksheet, records, old_pending[old_position:old_position + batch_size],
-                    scraper, analyzer, filters, attempted, language_gate, keyword_filter,
+                    scraper, analyzer, filters, attempted, language_gate, keyword_filter, title_filter,
                 )
                 completed += count
                 old_position += batch_size
@@ -583,16 +612,17 @@ def main():
         while running and old_position < len(old_pending):
             count, running = process_batch(
                 worksheet, records, old_pending[old_position:old_position + batch_size],
-                scraper, analyzer, filters, attempted, language_gate, keyword_filter,
+                scraper, analyzer, filters, attempted, language_gate, keyword_filter, title_filter,
             )
             completed += count
             old_position += batch_size
-        pending = sum(record["analysis_status"] not in ("done", "skipped_language", "skipped_keywords") for record in records.values())
+        pending = sum(record["analysis_status"] not in ("done", "skipped_language", "skipped_keywords", "skipped_title") for record in records.values())
         skipped = sum(record["analysis_status"] == "skipped_language" for record in records.values())
         skipped_keywords = sum(record["analysis_status"] == "skipped_keywords" for record in records.values())
+        skipped_titles = sum(not title_filter.matches(record["name"]) for record in records.values())
         eligible = sum(record["analysis_status"] == "done" and record["matches_filters"] is True
                        for record in records.values())
-        print(f"New jobs: {saved}; classified: {completed}; pending/review: {pending}; skipped language: {skipped}; skipped keywords: {skipped_keywords}; matching filters: {eligible}", flush=True)
+        print(f"New jobs: {saved}; classified: {completed}; pending/review: {pending}; skipped titles: {skipped_titles}; skipped language: {skipped}; skipped keywords: {skipped_keywords}; matching filters: {eligible}", flush=True)
         for message in dict.fromkeys(monitor.messages):
             print(f"ATTENTION: {message}", flush=True)
         if monitor.blocked:

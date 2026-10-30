@@ -1,0 +1,10 @@
+# Reject a job BEFORE downloading its description or calling the LLM.
+# Matching is case-insensitive. Plain terms match whole words.
+# A trailing '-' means a word prefix: stage- matches Stage and Stageplaats.
+# intern does not match internal or international.
+enabled: true
+reject_any:
+  - "intern"
+  - "internship"
+  - "stage-"
+  - "student"

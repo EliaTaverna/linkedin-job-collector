@@ -1,4 +1,4 @@
-"""Interpret keyword_filter.yaml and llm_output.yaml; no network calls."""
+"""Interpret title_filter.yaml, keyword_filter.yaml and llm_output.yaml."""
 
 import re
 from pathlib import Path
@@ -23,6 +23,58 @@ def column_name(number):
     return result
 
 
+def compile_terms(terms, group):
+    if not isinstance(terms, list):
+        raise ValueError(f"{group} must be a list of strings.")
+    compiled = []
+    for term in terms:
+        if not isinstance(term, str) or not term.strip():
+            raise ValueError(f"{group} contains an empty or invalid term.")
+        term = term.strip()
+        is_prefix = term.endswith("-")
+        base = term[:-1].strip() if is_prefix else term
+        if not base:
+            raise ValueError("A prefix must contain letters before its trailing '-'.")
+        # Match phrases across whitespace or hyphens, including Unicode hyphens.
+        pattern = r"[\s\u2010-\u2015-]+".join(re.escape(word) for word in base.split())
+        if is_prefix:
+            pattern += r"\w*"
+        compiled.append((term, re.compile(r"\b" + pattern + r"\b", re.IGNORECASE)))
+    return compiled
+
+
+class TitleFilter:
+    """Reject titles containing any configured whole word, phrase or prefix."""
+
+    @classmethod
+    def from_yaml(cls, path):
+        return cls(load_yaml(path))
+
+    def __init__(self, config):
+        if not isinstance(config, dict) or set(config) - {"enabled", "reject_any"}:
+            raise ValueError("Invalid title_filter.yaml settings.")
+        self.enabled = config.get("enabled", True)
+        if type(self.enabled) is not bool:
+            raise ValueError("title_filter.enabled must be true or false.")
+        self.reject_any = compile_terms(config.get("reject_any", []), "title_filter.reject_any")
+        if self.enabled and not self.reject_any:
+            raise ValueError("title_filter.reject_any must contain at least one term.")
+
+    def evaluate(self, title):
+        if not self.enabled:
+            return True, "Title filter disabled."
+        # Missing metadata is not proof of an unwanted title.
+        if not isinstance(title, str) or not title.strip():
+            return True, "No title to filter."
+        matches = [term for term, pattern in self.reject_any if pattern.search(title)]
+        if matches:
+            return False, "Excluded title term(s): " + ", ".join(matches)
+        return True, "Title filter passed."
+
+    def matches(self, title):
+        return self.evaluate(title)[0]
+
+
 class KeywordFilter:
     """Require every all_of term AND at least one any_of term."""
 
@@ -38,30 +90,10 @@ class KeywordFilter:
         self.enabled = config.get("enabled", True)
         if type(self.enabled) is not bool:
             raise ValueError("keyword_filter.enabled must be true or false.")
-        self.all_of = self._compile_terms(config.get("all_of", []), "all_of")
-        self.any_of = self._compile_terms(config.get("any_of", []), "any_of")
+        self.all_of = compile_terms(config.get("all_of", []), "keyword_filter.all_of")
+        self.any_of = compile_terms(config.get("any_of", []), "keyword_filter.any_of")
         if self.enabled and not self.any_of:
             raise ValueError("keyword_filter.any_of must contain at least one term.")
-
-    @classmethod
-    def _compile_terms(cls, terms, group):
-        if not isinstance(terms, list):
-            raise ValueError(f"keyword_filter.{group} must be a list of strings.")
-        compiled = []
-        for term in terms:
-            if not isinstance(term, str) or not term.strip():
-                raise ValueError(f"keyword_filter.{group} contains an empty or invalid term.")
-            term = term.strip()
-            is_prefix = term.endswith("-")
-            base = term[:-1].strip() if is_prefix else term
-            if not base:
-                raise ValueError("A prefix must contain letters before its trailing '-'.")
-            # Match phrases across whitespace or hyphens, including Unicode hyphens.
-            pattern = r"[\s\u2010-\u2015-]+".join(re.escape(word) for word in base.split())
-            if is_prefix:
-                pattern += r"\w*"
-            compiled.append((term, re.compile(r"\b" + pattern + r"\b", re.IGNORECASE)))
-        return compiled
 
     def evaluate(self, description):
         """Return (accepted, reason). Match description text only."""
