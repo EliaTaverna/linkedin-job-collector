@@ -1,0 +1,26 @@
+search_term: >-
+  ("data analyst" OR "operations analyst" OR "supply chain analyst")
+location: "Netherlands"
+distance: null
+hours_old: 7
+offset: 0
+results_wanted: 1000
+batch_size: 10
+request_delay_seconds: 5
+
+# A new tab in your existing spreadsheet, with the six requested fields first.
+sheet_name: "Jobs_Languages"
+# Reuse old descriptions while reclassifying the broader language requirements.
+copy_cached_from: "Jobs_AI"
+
+# Check the full description before spending LLM tokens.
+language_gate:
+  enabled: true
+  reject_languages: ["nl"]
+  minimum_score: 0.90  # A detector score, not a guaranteed accuracy percentage.
+  minimum_letters: 200  # Short or uncertain descriptions still go to the LLM.
+
+llm:
+  model: "gpt-6-luna"
+  reasoning_effort: "none"
+  max_output_tokens: 512

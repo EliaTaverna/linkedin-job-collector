@@ -1,0 +1,20 @@
+# Every all_of term AND at least one any_of term must occur in the description.
+# Matching is case-insensitive and uses whole-word boundaries.
+# Spaces in phrases also match hyphens; a trailing '-' means a word prefix.
+enabled: true
+all_of:
+  - "data"
+any_of:
+  - "model"
+  - "mathematical"
+  - "machine learning"
+  - "AI"
+  - "simul-"
+  - "optimiz-"
+  - "optimis-"  # British spelling.
+  - "SQL"
+  - "python"
+  - "logist-"
+  - "supply chain"
+  - "planning"
+  - "algorithm-"
