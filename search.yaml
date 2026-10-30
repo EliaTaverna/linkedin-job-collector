@@ -10,7 +10,14 @@ search_term: >-
   OR "inventory analyst" OR "capacity planner" OR "data consultant"
   OR "supply chain consultant" OR "business analyst"
   OR "machine learning engineer" OR "research software engineer"
-  OR "simulation developer")
+  OR "simulation developer"
+  OR "production engineer" OR "manufacturing engineer" OR "process engineer"
+  OR "process improvement engineer" OR "continuous improvement engineer"
+  OR "lean engineer" OR "industrialisation engineer" OR "industrialization engineer"
+  OR "operational excellence" OR "manufacturing excellence"
+  OR "warehouse engineer" OR "warehouse design engineer"
+  OR "supply planner" OR "material planner" OR "materials planner"
+  OR "production scheduler" OR "transport planner")
 # The same keyword query and filters apply to every location.
 locations:
   - "Netherlands"

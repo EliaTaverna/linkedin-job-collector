@@ -2,6 +2,8 @@
 # Matching is case-insensitive and uses whole-word boundaries.
 # Spaces in phrases also match hyphens, including Unicode hyphens.
 # All entries below are alternatives (OR); no match from each group is required.
+# A role can qualify through software, quantitative work, industrial methods,
+# or logistics/planning methods. Programming is not mandatory.
 enabled: true
 all_of: []
 any_of:
@@ -46,6 +48,7 @@ any_of:
   - "Process mining"
 
   # Simulation tools.
+  - "Simulation"
   - "AnyLogic"
   - "SimPy"
   - "Simio"
@@ -81,3 +84,68 @@ any_of:
   - "Statistical modeling"
   - "Regression analysis"
   - "Time series"
+
+  # Manufacturing, production and process improvement.
+  - "Lean manufacturing"
+  - "Lean production"
+  - "Lean methods"
+  - "Six Sigma"
+  - "Kaizen"
+  - "5S"
+  - "Kanban"
+  - "Just in time"
+  - "JIT"
+  - "OEE"
+  - "Overall equipment effectiveness"
+  - "SMED"
+  - "DMAIC"
+  - "Value stream mapping"
+  - "Line balancing"
+  - "Cycle time"
+  - "Cycle times"
+  - "Takt time"
+  - "Time study"
+  - "Time studies"
+  - "Work measurement"
+  - "Process capability"
+  - "Statistical process control"
+  - "Design of experiments"
+  - "Root cause analysis"
+  - "CNC"
+
+  # Logistics, capacity, production planning and industrial systems.
+  - "Capacity planning"
+  - "Capacity modelling"
+  - "Capacity modeling"
+  - "Material flow"
+  - "Materials flow"
+  - "Material handling"
+  - "Production planning"
+  - "Production scheduling"
+  - "Supply planning"
+  - "Materials planning"
+  - "MRP"
+  - "Material requirements planning"
+  - "MPS"
+  - "Master production schedule"
+  - "Sales and operations planning"
+  - "Inventory optimization"
+  - "Inventory optimisation"
+  - "Supply chain optimization"
+  - "Supply chain optimisation"
+  - "Network optimization"
+  - "Network optimisation"
+  - "Warehouse design"
+  - "Warehouse layout"
+  - "Warehouse automation"
+  - "Bottleneck analysis"
+  - "SAP PP"
+  - "SAP IBP"
+  - "SAP APO"
+  - "SAP EWM"
+  - "WMS"
+  - "TMS"
+  - "MES"
+  - "Kinaxis"
+  - "Blue Yonder"
+  - "RapidResponse"
