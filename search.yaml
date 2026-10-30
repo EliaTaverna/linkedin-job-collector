@@ -1,0 +1,14 @@
+search_term: >-
+  ("data analyst" OR "operations analyst" OR "supply chain analyst")
+
+location: "Netherlands"
+distance: null
+
+# Search postings from the last 26 hours
+hours_old: 26
+
+# Collect up to the current scraper's pagination ceiling
+results_wanted: 1000
+
+# Begin at the first search result
+offset: 0
