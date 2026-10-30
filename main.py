@@ -12,7 +12,6 @@ from langdetect.lang_detect_exception import LangDetectException
 DetectorFactory.seed = 0
 
 
-# Detect the language of an advert
 def detect_ad_language(description):
     if not isinstance(description, str) or not description.strip():
         return "unknown"
@@ -37,6 +36,33 @@ spreadsheet = client.open_by_key(os.environ["GOOGLE_SHEET_ID"])
 worksheet = spreadsheet.worksheet("Jobs")
 
 
+# Write only the column headings
+columns = [
+    "title",
+    "company",
+    "job_url",
+    "mentions_dutch",
+    "date_posted",
+    "ad_language",
+]
+
+worksheet.update(
+    range_name="A1:F1",
+    values=[columns],
+    raw=True,
+)
+
+
+# Read URLs already saved in column C, skipping the header
+existing_urls = {
+    url.strip()
+    for url in worksheet.col_values(3)[1:]
+    if isinstance(url, str) and url.strip()
+}
+
+print(f"Already saved: {len(existing_urls)} distinct job URLs")
+
+
 # Search LinkedIn
 print("Searching LinkedIn...", flush=True)
 
@@ -54,20 +80,22 @@ print(f"Returned {len(jobs)} jobs")
 print("Search errors:", jobs.attrs.get("errors", {}))
 
 
-# Prepare the table
-columns = [
-    "title",
-    "company",
-    "job_url",
-    "mentions_dutch",
-    "date_posted",
-    "ad_language",
-]
-
-rows = [columns]
-
+# Keep jobs whose URLs are not already in the sheet
 if not jobs.empty:
-    # Check whether the description mentions Dutch
+    jobs["job_url"] = jobs["job_url"].fillna("").str.strip()
+
+    has_url = jobs["job_url"] != ""
+    is_new = ~jobs["job_url"].isin(existing_urls)
+
+    jobs = (
+        jobs[has_url & is_new]
+        .drop_duplicates(subset=["job_url"])
+        .copy()
+    )
+
+
+# Prepare and append the new rows
+if not jobs.empty:
     jobs["mentions_dutch"] = (
         jobs["description"]
         .fillna("")
@@ -78,7 +106,6 @@ if not jobs.empty:
         )
     )
 
-    # Run our language-detection function on each description
     jobs["ad_language"] = jobs["description"].apply(
         detect_ad_language
     )
@@ -98,22 +125,22 @@ if not jobs.empty:
         - pd.Timestamp("1899-12-30", tz="UTC")
     ).dt.days
 
-    rows += output.fillna("").values.tolist()
+    rows = output.fillna("").values.tolist()
 
+    # Append new rows beneath the existing jobs
+    worksheet.append_rows(
+        values=rows,
+        value_input_option="RAW",
+        insert_data_option="INSERT_ROWS",
+        table_range="A1:F",
+    )
 
-# Replace columns A–F with the latest results
-worksheet.batch_clear(["A:F"])
+    worksheet.format(
+        "E2:E",
+        {"numberFormat": {"type": "DATE", "pattern": "dd/mm/yyyy"}},
+    )
 
-worksheet.update(
-    range_name="A1",
-    values=rows,
-    raw=True,
-)
+    print(f"Added {len(rows)} new jobs.", flush=True)
 
-# Display publication dates as day/month/year
-worksheet.format(
-    "E2:E",
-    {"numberFormat": {"type": "DATE", "pattern": "dd/mm/yyyy"}},
-)
-
-print(f"Saved {len(jobs)} jobs to Google Sheets.", flush=True)
+else:
+    print("No new jobs to add.", flush=True)
