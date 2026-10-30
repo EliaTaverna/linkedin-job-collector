@@ -21,13 +21,6 @@ search_term: >-
 # The same keyword query and filters apply to every location.
 locations:
   - "Netherlands"
-  - "Oslo, Norway"
-  - "Berlin, Germany"
-  - "Munich, Germany"
-  - "Gothenburg, Sweden"  # Göteborg.
-  - "Stockholm, Sweden"
-  - "Copenhagen, Denmark"
-  - "Paris, France"
 distance: null
 hours_old: 4
 offset: 0
