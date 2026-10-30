@@ -1,10 +1,30 @@
 search_term: >-
-  ("data analyst" OR "operations analyst" OR "supply chain analyst")
-location: "Netherlands"
+  ("data analyst" OR "data scientist" OR "business intelligence analyst"
+  OR "analytics consultant" OR "operations analyst" OR "supply chain analyst"
+  OR "logistics analyst" OR "logistics engineer" OR "logistic engineer"
+  OR "supply chain engineer" OR "operations research" OR "operational research"
+  OR "simulation consultant" OR "simulation engineer"
+  OR "optimization engineer" OR "optimisation engineer"
+  OR "process mining" OR "process intelligence" OR "process analyst"
+  OR "industrial engineer" OR "demand planner" OR "production planner"
+  OR "inventory analyst" OR "capacity planner" OR "data consultant"
+  OR "supply chain consultant" OR "business analyst"
+  OR "machine learning engineer" OR "research software engineer"
+  OR "simulation developer")
+# The same keyword query and filters apply to every location.
+locations:
+  - "Netherlands"
+  - "Oslo, Norway"
+  - "Berlin, Germany"
+  - "Munich, Germany"
+  - "Gothenburg, Sweden"  # Göteborg.
+  - "Stockholm, Sweden"
+  - "Copenhagen, Denmark"
+  - "Paris, France"
 distance: null
-hours_old: 7
+hours_old: 4
 offset: 0
-results_wanted: 1000
+results_wanted: 1000  # Maximum discovered IDs per location per run.
 batch_size: 10
 request_delay_seconds: 5
 

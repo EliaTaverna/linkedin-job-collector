@@ -52,6 +52,24 @@ def load_settings():
     if copy_cached_from is not None and (not isinstance(copy_cached_from, str) or not copy_cached_from.strip() or copy_cached_from == sheet_name):
         raise ValueError("copy_cached_from must name a different source worksheet.")
     llm = config.pop("llm")
+    if "locations" in config and "location" in config:
+        raise ValueError("Use locations or location in search.yaml, not both.")
+    if "locations" in config:
+        locations = config.pop("locations")
+    elif "location" in config:
+        locations = [config.pop("location")]
+    else:
+        raise ValueError("Missing setting: locations")
+    if not isinstance(locations, list) or not locations or any(
+        not isinstance(location, str) or not location.strip() for location in locations
+    ):
+        raise ValueError("locations must be a nonempty list of location names.")
+    # Preserve the chosen order while avoiding repeated searches for identical names.
+    unique_locations = {}
+    for location in locations:
+        location = location.strip()
+        unique_locations.setdefault(location.casefold(), location)
+    locations = list(unique_locations.values())
     filters = OUTPUT.filters
     keyword_filter = KeywordFilter.from_yaml(CONFIG_DIR / "keyword_filter.yaml")
     title_filter = TitleFilter.from_yaml(CONFIG_DIR / "title_filter.yaml")
@@ -90,19 +108,20 @@ def load_settings():
         raise ValueError("Unknown llm setting.")
     if type(llm.get("max_output_tokens", 512)) is not int or not 256 <= llm.get("max_output_tokens", 512) <= 4096:
         raise ValueError("llm.max_output_tokens must be between 256 and 4096.")
-    allowed = {"search_term", "location", "distance", "hours_old", "results_wanted", "offset"}
+    allowed = {"search_term", "distance", "hours_old", "results_wanted", "offset"}
     if set(config) - allowed:
         raise ValueError(f"Unknown search settings: {set(config) - allowed}")
-    for name in ("search_term", "location", "hours_old", "results_wanted"):
+    for name in ("search_term", "hours_old", "results_wanted"):
         if name not in config:
             raise ValueError(f"Missing setting: {name}")
-    settings = ScraperInput(
-        site_name=["linkedin"], fetch_description=False,
+    searches = [ScraperInput(
+        site_name=["linkedin"], fetch_description=False, location=location,
         description_format="plain", verbose=2, **config,
-    )
-    if settings.results_wanted > max_results or settings.offset >= max_results:
+    ) for location in locations]
+    if any(settings.results_wanted > max_results or settings.offset >= max_results
+           for settings in searches):
         raise ValueError(f"Search limit/offset must stay within JobSpy's {max_results} result ceiling.")
-    return settings, batch_size, float(delay), sheet_name, llm, filters, language_gate, keyword_filter, copy_cached_from, title_filter
+    return searches, batch_size, float(delay), sheet_name, llm, filters, language_gate, keyword_filter, copy_cached_from, title_filter
 
 
 def rejected_description_language(description, config):
@@ -465,7 +484,7 @@ class Collector(LinkedIn):
             if self.monitor.blocked:
                 break
             self.wait_before_request()
-            self.log.info(f"search page at offset {start}")
+            self.log.info(f"{settings.location}: search page at offset {start}")
             try:
                 response = self.session.get(
                     f"{self.base_url}/jobs-guest/jobs/api/seeMoreJobPostings/search",
@@ -544,8 +563,27 @@ class Collector(LinkedIn):
 
 
 
+def search_locations(scraper, searches, batch_size):
+    """Take one metadata batch per location in turn, sharing one request delay."""
+    active = [(settings, scraper.search_batches(batch_size)) for settings in searches]
+    while active and not scraper.monitor.blocked:
+        remaining = []
+        for settings, batches in active:
+            if scraper.monitor.blocked:
+                return
+            scraper.scraper_input = settings
+            try:
+                jobs = next(batches)
+            except StopIteration:
+                continue
+            # The caller finishes this batch's descriptions before the next search.
+            yield settings, jobs
+            remaining.append((settings, batches))
+        active = remaining
+
+
 def main():
-    settings, batch_size, delay, sheet_name, llm, filters, language_gate, keyword_filter, copy_cached_from, title_filter = load_settings()
+    searches, batch_size, delay, sheet_name, llm, filters, language_gate, keyword_filter, copy_cached_from, title_filter = load_settings()
     mode = os.environ.get("COLLECTOR_MODE", "all")
     if mode not in ("all", "descriptions"):
         raise ValueError("COLLECTOR_MODE must be all or descriptions.")
@@ -584,13 +622,13 @@ def main():
         completed = 0
         saved = 0
         running = True
-        scraper = Collector(settings, monitor, delay)
+        scraper = Collector(searches[0], monitor, delay)
         scraper.log.setLevel(logging.INFO)
         scraper.log.addHandler(monitor)
         print(f"Sheet: {sheet_name}; model: {llm['model']}; mode: {mode}", flush=True)
         if mode == "all":
-            print(f"Searching {settings.location}; lookback: {settings.hours_old} hours; batch: {batch_size}", flush=True)
-            for jobs in scraper.search_batches(batch_size):
+            print(f"Searching {len(searches)} locations; lookback: {searches[0].hours_old} hours; batch: {batch_size}", flush=True)
+            for settings, jobs in search_locations(scraper, searches, batch_size):
                 records, added = save_batch(worksheet, records, jobs, settings)
                 saved += added
                 count, running = process_batch(
@@ -598,7 +636,7 @@ def main():
                     scraper, analyzer, filters, attempted, language_gate, keyword_filter, title_filter,
                 )
                 completed += count
-                print(f"Batch saved: {added} new jobs; {count} classified.", flush=True)
+                print(f"{settings.location}: batch saved: {added} new jobs; {count} classified.", flush=True)
                 if not running:
                     break
                 count, running = process_batch(
