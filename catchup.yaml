@@ -1,0 +1,11 @@
+# Progress is saved per LinkedIn query + location in a separate spreadsheet tab.
+enabled: true
+state_sheet_name: "Collector_State"
+
+# Subsequent runs cover the time since the last completed search, plus overlap.
+# search.yaml hours_old remains the minimum lookback.
+overlap_hours: 1
+
+# A query/location with no checkpoint starts with the previous 24 hours.
+# If interrupted, that original window is retained until a search completes.
+initial_lookback_hours: 24
