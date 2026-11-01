@@ -3,11 +3,15 @@
 import json
 import logging
 import os
+import random
 import time
+from collections import deque
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 import gspread
+from gspread.exceptions import APIError
+from gspread.http_client import HTTPClient
 import requests
 import yaml
 from bs4 import BeautifulSoup
@@ -37,6 +41,82 @@ LAST_COLUMN = column_name(len(COLUMNS))
 ENUMS = OUTPUT.enums
 SCHEMA = OUTPUT.schema
 PROMPT = OUTPUT.instructions
+
+
+class QuotaAwareSheetsClient(HTTPClient):
+    """Pace Sheets calls and retry explicit quota rejections, including appends."""
+
+    MAX_CALLS_PER_MINUTE = 50  # Leave headroom below the standard per-user quota.
+    MAX_QUOTA_RETRIES = 6
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._calls = {"read": deque(), "write": deque()}
+
+    def _wait_for_slot(self, kind):
+        calls = self._calls[kind]
+        while True:
+            now = time.monotonic()
+            while calls and now - calls[0] >= 60:
+                calls.popleft()
+            if len(calls) < self.MAX_CALLS_PER_MINUTE:
+                calls.append(now)
+                return
+            time.sleep(max(0.05, calls[0] + 60.05 - now))
+
+    def request(self, method, *args, **kwargs):
+        kind = "read" if method.lower() in ("get", "head") else "write"
+        for attempt in range(self.MAX_QUOTA_RETRIES + 1):
+            self._wait_for_slot(kind)
+            try:
+                return super().request(method, *args, **kwargs)
+            except APIError as error:
+                # Do not replay appends after ambiguous network/server errors.
+                # An explicit 429 is a rejected request, safe to retry.
+                if error.response.status_code != 429 or attempt == self.MAX_QUOTA_RETRIES:
+                    raise
+                delay = min(32, 2 ** attempt) + random.random()
+                try:
+                    delay = max(delay, float(error.response.headers.get("Retry-After", 0)))
+                except (TypeError, ValueError):
+                    pass
+                print(f"Google Sheets quota (HTTP 429): waiting {delay:.1f}s before retry "
+                      f"{attempt + 1}/{self.MAX_QUOTA_RETRIES}.", flush=True)
+                time.sleep(delay)
+
+
+class SheetWriter:
+    """Coalesce changed rows; keep each API payload comfortably below 2 MB."""
+
+    def __init__(self, worksheet):
+        self.worksheet = worksheet
+        self.pending = {}
+        self.batch_requests = 0
+
+    def queue(self, record):
+        row = record["_row"]
+        self.pending[row] = {
+            "range": f"A{row}:{LAST_COLUMN}{row}",
+            "values": [[record.get(key, "") for key in COLUMNS]],
+        }
+
+    def flush(self):
+        while self.pending:
+            updates = []
+            rows = []
+            payload_bytes = 0
+            for row, update in self.pending.items():
+                size = len(json.dumps(update, ensure_ascii=False).encode("utf-8"))
+                if updates and (len(updates) >= 50 or payload_bytes + size > 1_000_000):
+                    break
+                rows.append(row)
+                updates.append(update)
+                payload_bytes += size
+            self.worksheet.batch_update(updates, raw=True)
+            self.batch_requests += 1
+            # Remove queued rows only after the server confirms the write.
+            for row in rows:
+                del self.pending[row]
 
 
 def load_settings():
@@ -240,15 +320,11 @@ def read_jobs(worksheet):
     return records
 
 
-def write_record(worksheet, record):
-    row = record["_row"]
-    worksheet.update(
-        range_name=f"A{row}:{LAST_COLUMN}{row}",
-        values=[[record.get(key, "") for key in COLUMNS]], raw=True,
-    )
+def write_record(writer, record):
+    writer.queue(record)
 
 
-def save_batch(worksheet, records, jobs, settings):
+def save_batch(worksheet, records, jobs, settings, writer):
     rows = []
     for job in jobs:
         url = job["job_url"]
@@ -260,7 +336,7 @@ def save_batch(worksheet, records, jobs, settings):
                     record[key] = job[key].isoformat() if isinstance(job[key], date) else job[key]
                     changed = True
             if changed:
-                write_record(worksheet, record)
+                write_record(writer, record)
             continue
         posted = job.get("date_posted")
         record = {
@@ -271,6 +347,8 @@ def save_batch(worksheet, records, jobs, settings):
             "search_query": settings.search_term,
         }
         rows.append([record.get(key, "") for key in COLUMNS])
+    # Commit changed metadata before reloading the worksheet after an append.
+    writer.flush()
     if rows:
         worksheet.append_rows(
             values=rows, value_input_option="RAW",
@@ -312,7 +390,7 @@ def import_cached_jobs(spreadsheet, worksheet, records, source_name):
     return records
 
 
-def apply_title_filter(worksheet, record, title_filter):
+def apply_title_filter(writer, record, title_filter):
     """Exclude titles before description requests; retain any existing paid analysis."""
     accepted, reason = title_filter.evaluate(record["name"])
     updates = {}
@@ -329,19 +407,28 @@ def apply_title_filter(worksheet, record, title_filter):
         )
     if any(record.get(key) != value for key, value in updates.items()):
         record.update(updates)
-        write_record(worksheet, record)
+        write_record(writer, record)
         if not accepted:
             print(f"Skipped by title: {record['name']}. {reason}", flush=True)
     return accepted
 
 
-def process_batch(worksheet, records, urls, scraper, analyzer, filters, attempted, language_gate, keyword_filter, title_filter):
+def process_batch(writer, records, urls, scraper, analyzer, filters, attempted, language_gate, keyword_filter, title_filter):
+    try:
+        return _process_batch(writer, records, urls, scraper, analyzer, filters, attempted,
+                              language_gate, keyword_filter, title_filter)
+    finally:
+        # Includes title/language/keyword rejections and early stops.
+        writer.flush()
+
+
+def _process_batch(writer, records, urls, scraper, analyzer, filters, attempted, language_gate, keyword_filter, title_filter):
     completed = 0
     for url in urls:
         if url in attempted:
             continue
         record = records[url]
-        if not apply_title_filter(worksheet, record, title_filter):
+        if not apply_title_filter(writer, record, title_filter):
             attempted.add(url)
             continue
         if record["analysis_status"] in ("done", "needs_review"):
@@ -363,20 +450,19 @@ def process_batch(worksheet, records, urls, scraper, analyzer, filters, attempte
                 description = ""
             if not isinstance(description, str) or not description.strip():
                 record["analysis_error"] = "Description unavailable; left pending for retry."
-                write_record(worksheet, record)
+                write_record(writer, record)
                 if scraper.monitor.blocked:
                     return completed, False
                 continue
             if len(description.encode("utf-16-le")) // 2 > 48000:
                 record["analysis_status"] = "needs_review"
                 record["analysis_error"] = "Description exceeds the cache-cell limit; review manually."
-                write_record(worksheet, record)
+                write_record(writer, record)
                 continue
             record["description"] = description
             record["analysis_status"] = "pending_analysis"
             record["analysis_error"] = ""
-            # Cache the source BEFORE the API call so retries need no LinkedIn download.
-            write_record(worksheet, record)
+            write_record(writer, record)
         # Matching rules live in keyword_filter.yaml; config_engine.py interprets them.
         accepted, reason = keyword_filter.evaluate(record["description"])
         if not accepted:
@@ -389,7 +475,7 @@ def process_batch(worksheet, records, urls, scraper, analyzer, filters, attempte
             changed = any(record.get(key) != value for key, value in skipped_values.items())
             record.update(skipped_values)
             if changed:
-                write_record(worksheet, record)
+                write_record(writer, record)
             print(f"{note} Job: {record['name']}", flush=True)
             continue
         rejection = rejected_description_language(record["description"], language_gate)
@@ -405,7 +491,7 @@ def process_batch(worksheet, records, urls, scraper, analyzer, filters, attempte
             changed = any(record.get(key) != value for key, value in skipped_values.items())
             record.update(skipped_values)
             if changed:
-                write_record(worksheet, record)
+                write_record(writer, record)
             print(f"{note} Job: {record['name']}", flush=True)
             continue
         if record["analysis_status"] in ("skipped_language", "skipped_keywords"):
@@ -414,14 +500,16 @@ def process_batch(worksheet, records, urls, scraper, analyzer, filters, attempte
                 **OUTPUT.blank_result(),
                 "matches_filters": "", "analysis_status": "pending_analysis", "analysis_error": "",
             })
-            write_record(worksheet, record)
+            write_record(writer, record)
+        # Persist descriptions before spending tokens, including queued rejections.
+        writer.flush()
         print(f"Classifying: {record['name']}", flush=True)
         try:
             result = analyzer.analyze(record)
         except AnalysisError as error:
             record["analysis_status"] = "pending_analysis"
             record["analysis_error"] = str(error)
-            write_record(worksheet, record)
+            write_record(writer, record)
             scraper.log.error(str(error))
             return completed, False
         record.update(result)
@@ -429,7 +517,9 @@ def process_batch(worksheet, records, urls, scraper, analyzer, filters, attempte
         record["analysis_status"] = "done"
         record["analysis_error"] = ""
         record["analysis_model"] = analyzer.config["model"]
-        write_record(worksheet, record)
+        write_record(writer, record)
+        # Retain completed paid classifications even if a later job fails.
+        writer.flush()
         completed += 1
     return completed, not scraper.monitor.blocked
 
@@ -594,6 +684,7 @@ def main():
         client = gspread.service_account_from_dict(
             json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]),
             scopes=["https://www.googleapis.com/auth/spreadsheets"],
+            http_client=QuotaAwareSheetsClient,
         )
         spreadsheet = client.open_by_key(os.environ["GOOGLE_SHEET_ID"])
         try:
@@ -606,15 +697,17 @@ def main():
         worksheet.hide_columns(COLUMNS.index("description"), len(COLUMNS))  # Cache/provenance fields.
         if copy_cached_from:
             records = import_cached_jobs(spreadsheet, worksheet, records, copy_cached_from)
+        writer = SheetWriter(worksheet)
         # Apply changed filters to cached results without spending more model tokens.
         for record in records.values():
-            if not apply_title_filter(worksheet, record, title_filter):
+            if not apply_title_filter(writer, record, title_filter):
                 continue
             if record["analysis_status"] == "done":
                 eligible = matches_filters(record, filters) and keyword_filter.matches(record["description"])
                 if record["matches_filters"] != eligible:
                     record["matches_filters"] = eligible
-                    write_record(worksheet, record)
+                    write_record(writer, record)
+        writer.flush()
         old_pending = [url for url, record in records.items()
                        if record["analysis_status"] in ("pending_description", "pending_analysis", "skipped_language", "skipped_keywords", "skipped_title")]
         old_position = 0
@@ -629,10 +722,10 @@ def main():
         if mode == "all":
             print(f"Searching {len(searches)} locations; lookback: {searches[0].hours_old} hours; batch: {batch_size}", flush=True)
             for settings, jobs in search_locations(scraper, searches, batch_size):
-                records, added = save_batch(worksheet, records, jobs, settings)
+                records, added = save_batch(worksheet, records, jobs, settings, writer)
                 saved += added
                 count, running = process_batch(
-                    worksheet, records, [job["job_url"] for job in jobs],
+                    writer, records, [job["job_url"] for job in jobs],
                     scraper, analyzer, filters, attempted, language_gate, keyword_filter, title_filter,
                 )
                 completed += count
@@ -640,7 +733,7 @@ def main():
                 if not running:
                     break
                 count, running = process_batch(
-                    worksheet, records, old_pending[old_position:old_position + batch_size],
+                    writer, records, old_pending[old_position:old_position + batch_size],
                     scraper, analyzer, filters, attempted, language_gate, keyword_filter, title_filter,
                 )
                 completed += count
@@ -649,7 +742,7 @@ def main():
                     break
         while running and old_position < len(old_pending):
             count, running = process_batch(
-                worksheet, records, old_pending[old_position:old_position + batch_size],
+                writer, records, old_pending[old_position:old_position + batch_size],
                 scraper, analyzer, filters, attempted, language_gate, keyword_filter, title_filter,
             )
             completed += count
@@ -661,6 +754,7 @@ def main():
         eligible = sum(record["analysis_status"] == "done" and record["matches_filters"] is True
                        for record in records.values())
         print(f"New jobs: {saved}; classified: {completed}; pending/review: {pending}; skipped titles: {skipped_titles}; skipped language: {skipped}; skipped keywords: {skipped_keywords}; matching filters: {eligible}", flush=True)
+        print(f"Sheets: {writer.batch_requests} batched row-update requests.", flush=True)
         for message in dict.fromkeys(monitor.messages):
             print(f"ATTENTION: {message}", flush=True)
         if monitor.blocked:
