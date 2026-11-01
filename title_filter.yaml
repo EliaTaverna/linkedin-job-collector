@@ -1,10 +1,37 @@
 # Reject a job BEFORE downloading its description or calling the LLM.
 # Matching is case-insensitive. Plain terms match whole words.
 # A trailing '-' means a word prefix: stage- matches Stage and Stageplaats.
-# intern does not match internal or international.
+# Keep intern as a whole word: intern- would also exclude internal/international.
 enabled: true
 reject_any:
+  # English internship titles, including plurals.
   - "intern"
-  - "internship"
+  - "interns"
+  - "internship-"
+
+  # Dutch/French variants: stagiair, stagiaire, stagiairs, stagiaires.
+  - "stagiair-"
   - "stage-"
-  - "student"
+  - "meewerkstage-"
+  - "afstude-"
+
+  # Student positions, including Dutch/German compounds.
+  - "student-"
+  - "werkstudent-"
+
+  # Thesis and graduation assignments.
+  - "thesis"
+  - "theses"
+  - "masterthesis"
+  - "bachelorthesis"
+  - "graduation project"
+  - "graduation assignment"
+
+  # Other explicit internship/work-study labels.
+  - "praktikant-"
+  - "praktikum-"
+  - "praktika"
+  - "tirocin-"
+  - "stagist-"
+  - "alternance"
+  - "alternant-"
