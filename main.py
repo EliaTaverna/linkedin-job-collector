@@ -188,8 +188,15 @@ class CheckpointStore:
             self.worksheet.update(range_name=f"A{row}:L{row}", values=values, raw=True)
             self.entries[entry["search_key"]] = dict(entry)
         else:
-            self.worksheet.append_rows(values=values, value_input_option="RAW",
-                                       insert_data_option="INSERT_ROWS", table_range="A1:L")
+            # Sheets values.append can choose a different detected table/column.
+            # The checkpoint schema must always be written into A:L.
+            row = max((item["_row"] for item in self.entries.values()), default=1) + 1
+            if row > self.worksheet.row_count:
+                self.worksheet.add_rows(max(100, row - self.worksheet.row_count))
+            occupied = self.worksheet.get(f"A{row}:L{row}", value_render_option="UNFORMATTED_VALUE")
+            if any(value not in ("", None) for values_row in occupied for value in values_row):
+                raise RuntimeError(f"Cannot save checkpoint: A{row}:L{row} is not empty.")
+            self.worksheet.update(range_name=f"A{row}:L{row}", values=values, raw=True)
             self._load()
 
     def begin(self, settings):
@@ -593,6 +600,63 @@ def write_record(writer, record):
     writer.queue(record)
 
 
+def write_new_job_rows(worksheet, records, rows):
+    """Write new records into explicit A:<last-column> cells, not values.append.
+
+    The Sheets append API locates a nearby "table" by inspecting sheet contents;
+    on a sparsely populated/edited sheet it can insert starting in column K
+    instead of A. That leaves the jobs invisible to read_jobs (job_url is H).
+    Fixed-address writes prevent that silent column offset.
+    """
+    if not rows:
+        return records
+
+    start = max((record["_row"] for record in records.values()), default=1) + 1
+    end = start + len(rows) - 1
+    if end > worksheet.row_count:
+        worksheet.add_rows(max(100, end - worksheet.row_count))
+
+    # Refuse to overwrite manual edits, stray data or another concurrent run.
+    occupied = worksheet.get(
+        f"A{start}:{LAST_COLUMN}{end}", value_render_option="UNFORMATTED_VALUE"
+    )
+    if any(value not in ("", None) for row in occupied for value in row):
+        raise RuntimeError(
+            f"Cannot save jobs: A{start}:{LAST_COLUMN}{end} already contains data. "
+            "Resolve overlapping collector runs or misplaced rows first."
+        )
+
+    # Split large cached descriptions to keep API payloads below ~1 MB.
+    offset = 0
+    while offset < len(rows):
+        batch, total_bytes = [], 0
+        while offset + len(batch) < len(rows) and len(batch) < 50:
+            candidate = rows[offset + len(batch)]
+            size = len(json.dumps(candidate, ensure_ascii=False).encode("utf-8"))
+            if batch and total_bytes + size > 900_000:
+                break
+            batch.append(candidate)
+            total_bytes += size
+        first = start + offset
+        last = first + len(batch) - 1
+        worksheet.update(
+            range_name=f"A{first}:{LAST_COLUMN}{last}", values=batch, raw=True
+        )
+        offset += len(batch)
+
+    refreshed = read_jobs(worksheet)
+    url_index = COLUMNS.index("job_url")
+    missing = [row[url_index] for row in rows if row[url_index] not in refreshed]
+    if missing:
+        raise RuntimeError(
+            "Some newly written job URLs could not be read back from column H: "
+            + ", ".join(map(str, missing[:5]))
+            + ". Search progress was not acknowledged; retry after inspecting the sheet."
+        )
+    log_event(f"Saved and verified {len(rows)} new jobs at A{start}:{LAST_COLUMN}{end}.")
+    return refreshed
+
+
 def save_batch(worksheet, records, jobs, settings, writer):
     rows = []
     for job in jobs:
@@ -617,14 +681,10 @@ def save_batch(worksheet, records, jobs, settings, writer):
         }
         ensure_record_identity(record)
         rows.append([record.get(key, "") for key in COLUMNS])
-    # Commit changed metadata before reloading the worksheet after an append.
+    # Commit changed metadata before inserting new rows into the sheet.
     writer.flush()
     if rows:
-        worksheet.append_rows(
-            values=rows, value_input_option="RAW",
-            insert_data_option="INSERT_ROWS", table_range=f"A1:{LAST_COLUMN}",
-        )
-        records = read_jobs(worksheet)
+        records = write_new_job_rows(worksheet, records, rows)
     return records, len(rows)
 
 
@@ -652,12 +712,9 @@ def import_cached_jobs(spreadsheet, worksheet, records, source_name):
         record["analysis_status"] = "pending_analysis" if record["description"] else "pending_description"
         ensure_record_identity(record)
         additions.append([record.get(key, "") for key in COLUMNS])
-    for start in range(0, len(additions), 50):
-        worksheet.append_rows(values=additions[start:start + 50], value_input_option="RAW",
-                              insert_data_option="INSERT_ROWS", table_range=f"A1:{LAST_COLUMN}")
     if additions:
+        records = write_new_job_rows(worksheet, records, additions)
         log_event(f"Imported {len(additions)} cached jobs from {source_name}; language requirements will be rechecked.")
-        records = read_jobs(worksheet)
     return records
 
 
