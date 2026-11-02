@@ -541,8 +541,44 @@ def read_jobs(worksheet):
             continue
         if url in records:
             raise ValueError(f"Duplicate job URL in row {number}.")
-        if record["analysis_status"] not in ("pending_description", "pending_analysis", "done", "needs_review", "skipped_language", "skipped_keywords", "skipped_title"):
-            raise ValueError(f"Invalid analysis_status in row {number}.")
+        # Recover incomplete rows instead of stopping the entire scheduled run.
+        # Only the first len(COLUMNS) columns belong to the collector; any
+        # user-maintained columns to their right remain untouched by SheetWriter.
+        valid_statuses = (
+            "pending_description", "pending_analysis", "done", "needs_review",
+            "skipped_language", "skipped_keywords", "skipped_title",
+        )
+        raw_status = record["analysis_status"]
+        status = str(raw_status or "").strip()
+        if status not in valid_statuses:
+            if not status:
+                # Avoid paying for a second LLM call if a completed result
+                # merely lost its status due to an interrupted/manual edit.
+                completed_result = False
+                if record.get("analysis_model"):
+                    try:
+                        validate_analysis({key: record[key] for key in OUTPUT.fields})
+                        completed_result = True
+                    except (ValueError, TypeError, KeyError):
+                        pass
+                status = (
+                    "done" if completed_result else
+                    "pending_analysis" if record["description"] else
+                    "pending_description"
+                )
+                log_event(f"Repaired blank analysis_status in row {number}: {status}.")
+            else:
+                # Do not guess what an unknown nonempty status means.
+                log_event(f"Unrecognized analysis_status in row {number}: {status!r}; queued for review.")
+                if not record.get("analysis_error"):
+                    record["analysis_error"] = f"Invalid analysis_status {status!r}; review manually."
+                status = "needs_review"
+            record["analysis_status"] = status
+            record["matches_filters"] = ""  # A partial result is not a filter decision.
+            record["_recovery_dirty"] = True
+        elif raw_status != status:
+            record["analysis_status"] = status
+            record["_recovery_dirty"] = True
         if record["analysis_status"] == "done":
             validate_analysis({key: record[key] for key in OUTPUT.fields})
         record["job_url"] = url
@@ -975,9 +1011,15 @@ def main():
         if copy_cached_from:
             records = import_cached_jobs(spreadsheet, worksheet, records, copy_cached_from)
         writer = SheetWriter(worksheet)
+        # Persist repaired statuses through the existing quota-aware batch writer.
+        # This also leaves manually maintained columns outside COLUMNS intact.
+        recovered = 0
         # Apply changed filters to cached results without spending more model tokens.
         backfilled = 0
         for record in records.values():
+            if record.pop("_recovery_dirty", False):
+                write_record(writer, record)
+                recovered += 1
             if record.pop("_identity_dirty", False):
                 write_record(writer, record)
                 backfilled += 1
@@ -989,6 +1031,8 @@ def main():
                     record["matches_filters"] = eligible
                     write_record(writer, record)
         writer.flush()
+        if recovered:
+            log_event(f"Recovered and saved {recovered} job rows with invalid/missing analysis_status.")
         if backfilled:
             log_event(f"Added record_id to {backfilled} cached jobs using their first_seen_at timestamps.")
         old_pending = [url for url, record in records.items()
